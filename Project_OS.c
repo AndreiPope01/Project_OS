@@ -4,14 +4,43 @@
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <time.h>
 
-struct File {
-    char name[256];
+#define MAX_PATH_LENGTH 1024
+#define MAX_ENTRIES 1000
+
+struct Entry {
+    char name[MAX_PATH_LENGTH];
     mode_t mode;
     off_t size;
+    time_t last_modified;
 };
 
-void traverseDirectory(const char *path) {
+struct DirectorySnapshot {
+    char directory[MAX_PATH_LENGTH];
+    struct Entry entries[MAX_ENTRIES];
+    int num_entries;
+};
+
+void recordEntry(struct DirectorySnapshot *snapshot, const char *name, const struct stat *statbuf) {
+    if (snapshot->num_entries >= MAX_ENTRIES) {
+        char errMsg[MAX_PATH_LENGTH + 50];
+        snprintf(errMsg, sizeof(errMsg), "Too many entries in directory %s\n", snapshot->directory);
+        fputs(errMsg, stderr);
+        return;
+    }
+
+    struct Entry *entry = &snapshot->entries[snapshot->num_entries++];
+    strncpy(entry->name, name, MAX_PATH_LENGTH);
+    entry->mode = statbuf->st_mode;
+    entry->size = statbuf->st_size;
+    entry->last_modified = statbuf->st_mtime;
+}
+
+void traverseDirectory(struct DirectorySnapshot *snapshot, const char *path) {
     DIR *dir;
     struct dirent *entry;
     struct stat fileStat;
@@ -19,36 +48,51 @@ void traverseDirectory(const char *path) {
     dir = opendir(path);
     
     if (!dir) {
-        fprintf(stderr, "Cannot open directory %s\n", path);
+        perror("Cannot open directory");
         return;
     }
-    
-    printf("Snapshot of directory: %s\n", path);
+
+    recordEntry(snapshot, path, &fileStat);
+
     while ((entry = readdir(dir)) != NULL) {
-        char filePath[512];
-        struct File file;
-
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-
+        char filePath[MAX_PATH_LENGTH];
         snprintf(filePath, sizeof(filePath), "%s/%s", path, entry->d_name);
 
         if (lstat(filePath, &fileStat) < 0) {
-            fprintf(stderr, "Failed to get file status for %s\n", filePath);
+            perror("Failed to get file status");
             continue;
         }
 
-        strncpy(file.name, entry->d_name, sizeof(file.name));
-        file.mode = fileStat.st_mode;
-        file.size = fileStat.st_size;
-
-        printf("Name: %s, Mode: %o, Size: %lld bytes\n", file.name, file.mode, (long long)file.size);
-
-        if (S_ISDIR(file.mode)) {
-            traverseDirectory(filePath);
+        if (S_ISDIR(fileStat.st_mode)) {
+            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+                traverseDirectory(snapshot, filePath);
+            }
+        } else {
+            recordEntry(snapshot, entry->d_name, &fileStat);
         }
     }
     closedir(dir);
+}
+
+void printSnapshot(struct DirectorySnapshot *snapshot, const char *outputFileName) {
+    FILE *outputFile = fopen(outputFileName, "w");
+    if (!outputFile) {
+        perror("Failed to open output file");
+        return;
+    }
+
+    char buffer[1024];
+    snprintf(buffer, sizeof(buffer), "Snapshot of directory: %s\n", snapshot->directory);
+    fputs(buffer, outputFile);
+    
+    for (int i = 0; i < snapshot->num_entries; ++i) {
+        struct Entry *entry = &snapshot->entries[i];
+        snprintf(buffer, sizeof(buffer), "Name: %s, Mode: %o, Size: %lld bytes, Last Modified: %s", 
+            entry->name, entry->mode, (long long)entry->size, ctime(&entry->last_modified));
+        fputs(buffer, outputFile);
+    }
+
+    fclose(outputFile);
 }
 
 int main(int argc, char *argv[]) {
@@ -57,8 +101,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    char *path = argv[1];
-    traverseDirectory(path);
+    struct DirectorySnapshot snapshot;
+    strncpy(snapshot.directory, argv[1], MAX_PATH_LENGTH);
+    snapshot.num_entries = 0;
+
+    traverseDirectory(&snapshot, argv[1]);
+    printSnapshot(&snapshot, "snapshot.txt");
 
     return 0;
 }
