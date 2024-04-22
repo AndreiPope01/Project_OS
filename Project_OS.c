@@ -11,6 +11,7 @@
 
 #define MAX_PATH_LENGTH 1024
 #define MAX_ENTRIES 1000
+#define MAX_DIRECTORIES 10
 
 struct Entry {
     char name[MAX_PATH_LENGTH];
@@ -24,6 +25,10 @@ struct DirectorySnapshot {
     struct Entry entries[MAX_ENTRIES];
     int num_entries;
 };
+
+struct DirectorySnapshot snapshots[MAX_DIRECTORIES];
+
+int num_snapshots = 0;
 
 void recordEntry(struct DirectorySnapshot *snapshot, const char *name, const struct stat *statbuf) {
     if (snapshot->num_entries >= MAX_ENTRIES) {
@@ -48,7 +53,9 @@ void traverseDirectory(struct DirectorySnapshot *snapshot, const char *path) {
     dir = opendir(path);
     
     if (!dir) {
-        perror("Cannot open directory");
+        char errMsg[MAX_PATH_LENGTH + 50];
+        snprintf(errMsg, sizeof(errMsg), "Cannot open directory %s\n", path);
+        fputs(errMsg, stderr);
         return;
     }
 
@@ -59,7 +66,9 @@ void traverseDirectory(struct DirectorySnapshot *snapshot, const char *path) {
         snprintf(filePath, sizeof(filePath), "%s/%s", path, entry->d_name);
 
         if (lstat(filePath, &fileStat) < 0) {
-            perror("Failed to get file status");
+            char errMsg[MAX_PATH_LENGTH + 50];
+            snprintf(errMsg, sizeof(errMsg), "Failed to get file status for %s\n", filePath);
+            fputs(errMsg, stderr);
             continue;
         }
 
@@ -77,7 +86,9 @@ void traverseDirectory(struct DirectorySnapshot *snapshot, const char *path) {
 void printSnapshot(struct DirectorySnapshot *snapshot, const char *outputFileName) {
     FILE *outputFile = fopen(outputFileName, "w");
     if (!outputFile) {
-        perror("Failed to open output file");
+        char errMsg[MAX_PATH_LENGTH + 50];
+        snprintf(errMsg, sizeof(errMsg), "Failed to open output file %s\n", outputFileName);
+        fputs(errMsg, stderr);
         return;
     }
 
@@ -95,18 +106,44 @@ void printSnapshot(struct DirectorySnapshot *snapshot, const char *outputFileNam
     fclose(outputFile);
 }
 
+void updateSnapshot(const char *directory) {
+    int found = 0;
+    for (int i = 0; i < num_snapshots; ++i) {
+        if (strcmp(snapshots[i].directory, directory) == 0) {
+            found = 1;
+            traverseDirectory(&snapshots[i], directory);
+            printSnapshot(&snapshots[i], "snapshot.txt");
+            break;
+        }
+    }
+
+    if (!found) {
+        if (num_snapshots >= MAX_DIRECTORIES) {
+            char errMsg[MAX_PATH_LENGTH + 50];
+            snprintf(errMsg, sizeof(errMsg), "Maximum number of directories reached\n");
+            fputs(errMsg, stderr);
+            return;
+        }
+        
+        strncpy(snapshots[num_snapshots].directory, directory, MAX_PATH_LENGTH);
+        snapshots[num_snapshots].num_entries = 0;
+        traverseDirectory(&snapshots[num_snapshots], directory);
+        printSnapshot(&snapshots[num_snapshots], "snapshot.txt");
+        num_snapshots++;
+    }
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        printf("Usage: %s <directory_path>\n", argv[0]);
+    if (argc < 2 || argc > MAX_DIRECTORIES + 1) {
+        char errMsg[MAX_PATH_LENGTH + 50];
+        snprintf(errMsg, sizeof(errMsg), "Usage: %s <directory1> <directory2> ... <directory%d>\n", argv[0], MAX_DIRECTORIES);
+        fputs(errMsg, stderr);
         return 1;
     }
 
-    struct DirectorySnapshot snapshot;
-    strncpy(snapshot.directory, argv[1], MAX_PATH_LENGTH);
-    snapshot.num_entries = 0;
-
-    traverseDirectory(&snapshot, argv[1]);
-    printSnapshot(&snapshot, "snapshot.txt");
+    for (int i = 1; i < argc; ++i) {
+        updateSnapshot(argv[i]);
+    }
 
     return 0;
 }
