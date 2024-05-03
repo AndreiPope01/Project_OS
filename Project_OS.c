@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/wait.h>
 
 #define MAX_PATH_LENGTH 1024
 #define MAX_ENTRIES 1000
@@ -45,7 +46,7 @@ void recordEntry(struct DirectorySnapshot *snapshot, const char *name, const str
     entry->last_modified = statbuf->st_mtime;
 }
 
-void traverseDirectory(struct DirectorySnapshot *snapshot, const char *path) {
+void traverseDirectory(struct DirectorySnapshot *snapshot, const char *path, const char *isolatedDir) {
     DIR *dir;
     struct dirent *entry;
     struct stat fileStat;
@@ -74,13 +75,47 @@ void traverseDirectory(struct DirectorySnapshot *snapshot, const char *path) {
 
         if (S_ISDIR(fileStat.st_mode)) {
             if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
-                traverseDirectory(snapshot, filePath);
+                traverseDirectory(snapshot, filePath, isolatedDir);
             }
         } else {
             recordEntry(snapshot, entry->d_name, &fileStat);
+            verifyPermissionsAndIsolate(filePath, isolatedDir);
         }
     }
     closedir(dir);
+}
+
+void verifyPermissionsAndIsolate(const char *filePath, const char *isolatedDir) {
+    struct stat fileStat;
+    if (lstat(filePath, &fileStat) < 0) {
+        perror("Failed to get file status");
+        return;
+    }
+
+    // Check if all permissions are missing
+    if ((fileStat.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child process
+            execl("/bin/bash", "/bin/bash", "verify_for_malicious.sh", filePath, isolatedDir, NULL);
+            // If execl fails, handle it accordingly
+            exit(EXIT_FAILURE);
+        } else if (pid > 0) {
+            // Parent process
+            int status;
+            waitpid(pid, &status, 0);
+            // Move the file to isolated directory if deemed dangerous
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 1) {
+                char isolatedPath[MAX_PATH_LENGTH];
+                snprintf(isolatedPath, sizeof(isolatedPath), "%s/%s", isolatedDir, basename(filePath));
+                if (rename(filePath, isolatedPath) == -1) {
+                    perror("Failed to move file to isolated directory");
+                }
+            }
+        } else {
+            perror("Failed to fork process");
+        }
+    }
 }
 
 void printSnapshot(struct DirectorySnapshot *snapshot, const char *outputFileName) {
@@ -106,12 +141,12 @@ void printSnapshot(struct DirectorySnapshot *snapshot, const char *outputFileNam
     fclose(outputFile);
 }
 
-void updateSnapshot(const char *directory) {
+void updateSnapshot(const char *directory, const char *isolatedDir) {
     int found = 0;
     for (int i = 0; i < num_snapshots; ++i) {
         if (strcmp(snapshots[i].directory, directory) == 0) {
             found = 1;
-            traverseDirectory(&snapshots[i], directory);
+            traverseDirectory(&snapshots[i], directory, isolatedDir);
             printSnapshot(&snapshots[i], "snapshot.txt");
             break;
         }
@@ -127,22 +162,60 @@ void updateSnapshot(const char *directory) {
         
         strncpy(snapshots[num_snapshots].directory, directory, MAX_PATH_LENGTH);
         snapshots[num_snapshots].num_entries = 0;
-        traverseDirectory(&snapshots[num_snapshots], directory);
+        traverseDirectory(&snapshots[num_snapshots], directory, isolatedDir);
         printSnapshot(&snapshots[num_snapshots], "snapshot.txt");
         num_snapshots++;
     }
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2 || argc > MAX_DIRECTORIES + 1) {
+    if (argc < 4 || argc > MAX_DIRECTORIES + 4) {
         char errMsg[MAX_PATH_LENGTH + 50];
-        snprintf(errMsg, sizeof(errMsg), "Usage: %s <directory1> <directory2> ... <directory%d>\n", argv[0], MAX_DIRECTORIES);
+        snprintf(errMsg, sizeof(errMsg), "Usage: %s -o <output_dir> -s <isolated_space_dir> <dir1> <dir2> ... <dir%d>\n", argv[0], MAX_DIRECTORIES);
         fputs(errMsg, stderr);
         return 1;
     }
 
+    const char *outputDir;
+    const char *isolatedDir;
+    int directoriesStartIndex = 3;
+
+    // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
-        updateSnapshot(argv[i]);
+        if (strcmp(argv[i], "-o") == 0) {
+            if (i + 1 < argc) {
+                outputDir = argv[i + 1];
+                i++; // Skip next argument
+            } else {
+                fputs("Missing argument for output directory\n", stderr);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-s") == 0) {
+            if (i + 1 < argc) {
+                isolatedDir = argv[i + 1];
+                i++; // Skip next argument
+            } else {
+                fputs("Missing argument for isolated space directory\n", stderr);
+                return 1;
+            }
+        } else {
+            directoriesStartIndex = i;
+            break;
+        }
+    }
+
+    if (access(outputDir, F_OK) == -1) {
+        perror("Output directory does not exist");
+        return 1;
+    }
+
+    if (access(isolatedDir, F_OK) == -1) {
+        perror("Isolated space directory does not exist");
+        return 1;
+    }
+
+    for (int i = directoriesStartIndex; i < argc; ++i) {
+        updateSnapshot(argv[i], isolatedDir);
     }
 
     return 0;
