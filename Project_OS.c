@@ -8,7 +8,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
-///#include <sys/wait.h>
+#include <sys/wait.h>
 
 #define MAX_PATH_LENGTH 1024
 #define MAX_ENTRIES 1000
@@ -95,7 +95,7 @@ void verifyPermissionsAndIsolate(const char *filePath, const char *isolatedDir) 
     if ((fileStat.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) == 0) {
         pid_t pid = fork();
         if (pid == 0) {
-            execl("/bin/bash", "/bin/bash", "verify_for_malicious.sh", filePath, isolatedDir, NULL);
+            execl("./verify_for_malicious.sh", "./verify_for_malicious.sh", filePath, isolatedDir, NULL);
             exit(EXIT_FAILURE);
         } else if (pid > 0) {
             int status;
@@ -175,12 +175,11 @@ int main(int argc, char *argv[]) {
     const char *isolatedDir;
     int directoriesStartIndex = 3;
 
-    // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 < argc) {
                 outputDir = argv[i + 1];
-                i++; // Skip next argument
+                i++;
             } else {
                 fputs("Missing argument for output directory\n", stderr);
                 return 1;
@@ -188,7 +187,7 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "-s") == 0) {
             if (i + 1 < argc) {
                 isolatedDir = argv[i + 1];
-                i++; // Skip next argument
+                i++;
             } else {
                 fputs("Missing argument for isolated space directory\n", stderr);
                 return 1;
